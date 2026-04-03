@@ -77,6 +77,7 @@ public class RateLimiterService {
 
     public void reset(String clientId) {
         requestWindows.remove(clientId);
+        clientConfigs.remove(clientId);
         log.info("Reset rate limiter for client {}", clientId);
     }
 

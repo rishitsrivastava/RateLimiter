@@ -21,6 +21,7 @@ export default function App() {
   const [clientId, setClientId] = useState("user-1");
   const [maxRequests, setMaxRequests] = useState(5);
   const [windowSeconds, setWindowSeconds] = useState(30);
+  const [mode, setMode] = useState("REJECT");
   const [configSet, setConfigSet] = useState(false);
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState(null);
@@ -28,6 +29,8 @@ export default function App() {
   const [totalSent, setTotalSent] = useState(0);
   const [totalAllowed, setTotalAllowed] = useState(0);
   const [totalRejected, setTotalRejected] = useState(0);
+  const [totalQueued, setTotalQueued] = useState(0);
+  const [totalProcessed, setTotalProcessed] = useState(0);
   const stopRef = useRef(false);
 
   const addLog = (entry) => setLogs((prev) => [entry, ...prev].slice(0, 50));
@@ -44,8 +47,10 @@ export default function App() {
       setTotalSent(0);
       setTotalAllowed(0);
       setTotalRejected(0);
+      setTotalQueued(0);
+      setTotalProcessed(0);
       setStatus(null);
-      addLog({ id: Date.now(), type: "info", message: `Config set — ${maxRequests} requests / ${windowSeconds}s` });
+      addLog({ id: Date.now(), type: "info", message: `⚙ Config set — ${maxRequests} requests / ${windowSeconds}s · Mode: ${mode}` });
     } catch {
       addLog({ id: Date.now(), type: "error", message: "Failed to set config" });
     }
@@ -62,24 +67,77 @@ export default function App() {
     if (!configSet) return alert("Set config first!");
     setRunning(true);
     stopRef.current = false;
+
+    const promises = [];
+
     for (let i = 1; i <= count; i++) {
       if (stopRef.current) break;
-      const start = Date.now();
-      try {
-        await axios.post(`${BASE_URL}/ping`, { clientId });
-        const ms = Date.now() - start;
-        setTotalSent((p) => p + 1);
-        setTotalAllowed((p) => p + 1);
-        addLog({ id: Date.now() + i, type: "allowed", message: `#${i}  ✅  ALLOWED  ${ms}ms` });
-      } catch {
-        const ms = Date.now() - start;
-        setTotalSent((p) => p + 1);
-        setTotalRejected((p) => p + 1);
-        addLog({ id: Date.now() + i, type: "rejected", message: `#${i}  ❌  REJECTED 429  ${ms}ms` });
+
+      const reqNum = i;
+      setTotalSent((p) => p + 1);
+
+      const promise = (async () => {
+        const start = Date.now();
+        addLog({
+          id: start + reqNum,
+          type: "pending",
+          message: `#${reqNum}  ⏳  Sending...`,
+        });
+
+        try {
+          const res = await axios.post(`${BASE_URL}/ping`, { clientId, mode });
+          const ms = Date.now() - start;
+          const data = res.data;
+
+          if (data.status === "ALLOWED") {
+            setTotalAllowed((p) => p + 1);
+            addLog({
+              id: Date.now() + reqNum,
+              type: "allowed",
+              message: `#${reqNum}  ✅  ALLOWED  ${ms}ms`,
+            });
+          } else if (data.status === "QUEUED_AND_PROCESSED") {
+            setTotalProcessed((p) => p + 1);
+            addLog({
+              id: Date.now() + reqNum,
+              type: "processed",
+              message: `#${reqNum}  ✅  QUEUED → PROCESSED  waited ${ms}ms`,
+            });
+          }
+        } catch (err) {
+          const ms = Date.now() - start;
+          if (err.response?.status === 429) {
+            setTotalRejected((p) => p + 1);
+            addLog({
+              id: Date.now() + reqNum,
+              type: "rejected",
+              message: `#${reqNum}  ❌  REJECTED 429  ${ms}ms`,
+            });
+          }
+        }
+
+        await fetchStatus();
+      })();
+
+      // In QUEUE mode fire all requests concurrently
+      // In REJECT mode fire sequentially with small delay
+      if (mode === "QUEUE") {
+        promises.push(promise);
+        await new Promise((r) => setTimeout(r, 100));
+      } else {
+        await promise;
+        await new Promise((r) => setTimeout(r, 200));
       }
-      await fetchStatus();
-      await new Promise((r) => setTimeout(r, 200));
     }
+
+    // Wait for all queued requests to resolve
+    if (mode === "QUEUE") {
+      // Update queued count while waiting
+      setTotalQueued(promises.length);
+      await Promise.all(promises);
+      setTotalQueued(0);
+    }
+
     setRunning(false);
   };
 
@@ -90,8 +148,11 @@ export default function App() {
       setTotalSent(0);
       setTotalAllowed(0);
       setTotalRejected(0);
+      setTotalQueued(0);
+      setTotalProcessed(0);
       setStatus(null);
       setConfigSet(false);
+      addLog({ id: Date.now(), type: "info", message: "🔄 Rate limiter reset!" });
     } catch {}
   };
 
@@ -100,7 +161,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white overflow-x-hidden">
 
-      {/* Background glow blobs */}
+      {/* Background blobs */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden">
         <div className="absolute -top-40 -left-40 w-96 h-96 bg-violet-700 opacity-20 rounded-full blur-3xl" />
         <div className="absolute top-1/2 -right-40 w-80 h-80 bg-indigo-600 opacity-15 rounded-full blur-3xl" />
@@ -110,16 +171,13 @@ export default function App() {
       <div className="relative max-w-5xl mx-auto px-6 py-12">
 
         {/* Header */}
-        <motion.div
-          className="text-center mb-12"
-          initial="hidden" animate="visible" variants={fadeUp}
-        >
+        <motion.div className="text-center mb-12" initial="hidden" animate="visible" variants={fadeUp}>
           <motion.div
             className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 text-sm text-violet-300 mb-4"
             variants={fadeUp} custom={0}
           >
             <span className="w-2 h-2 rounded-full bg-violet-400 animate-pulse inline-block" />
-            Sliding Window Algorithm
+            Sliding Window · Per Client
           </motion.div>
           <motion.h1
             className="text-5xl font-bold bg-gradient-to-r from-white via-violet-200 to-indigo-300 bg-clip-text text-transparent"
@@ -127,39 +185,35 @@ export default function App() {
           >
             Rate Limiter
           </motion.h1>
-          <motion.p
-            className="text-gray-400 mt-3 text-lg"
-            variants={fadeUp} custom={2}
-          >
-            Per-client · Real-time · Reject mode
+          <motion.p className="text-gray-400 mt-3 text-lg" variants={fadeUp} custom={2}>
+            Reject or Queue — you decide
           </motion.p>
         </motion.div>
 
         {/* Stats Row */}
-        <motion.div
-          className="grid grid-cols-3 gap-4 mb-6"
-          initial="hidden" animate="visible"
-        >
+        <motion.div className="grid grid-cols-5 gap-3 mb-6" initial="hidden" animate="visible">
           {[
             { label: "Sent", value: totalSent, color: "text-white" },
             { label: "Allowed", value: totalAllowed, color: "text-emerald-400" },
             { label: "Rejected", value: totalRejected, color: "text-red-400" },
+            { label: "Queued", value: totalQueued, color: "text-yellow-400" },
+            { label: "Processed", value: totalProcessed, color: "text-cyan-400" },
           ].map((s, i) => (
             <motion.div
               key={s.label}
               variants={fadeUp} custom={i}
-              className="bg-white/5 backdrop-blur border border-white/10 rounded-2xl p-5 text-center"
+              className="bg-white/5 backdrop-blur border border-white/10 rounded-2xl p-4 text-center"
             >
               <motion.div
                 key={s.value}
                 initial={{ scale: 1.4, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ duration: 0.3 }}
-                className={`text-4xl font-bold ${s.color}`}
+                className={`text-3xl font-bold ${s.color}`}
               >
                 {s.value}
               </motion.div>
-              <div className="text-gray-400 text-sm mt-1">{s.label}</div>
+              <div className="text-gray-400 text-xs mt-1">{s.label}</div>
             </motion.div>
           ))}
         </motion.div>
@@ -174,6 +228,7 @@ export default function App() {
             <h2 className="text-base font-semibold text-gray-200 mb-4 flex items-center gap-2">
               <span className="text-violet-400">⚙</span> Configuration
             </h2>
+
             <div className="space-y-3">
               {[
                 { label: "Client ID", value: clientId, setter: setClientId, type: "text" },
@@ -190,9 +245,36 @@ export default function App() {
                   />
                 </div>
               ))}
+
+              {/* Mode Toggle */}
+              <div>
+                <label className="text-xs text-gray-500 uppercase tracking-wider">Mode</label>
+                <div className="mt-1 flex rounded-xl overflow-hidden border border-white/10">
+                  {["REJECT", "QUEUE"].map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMode(m)}
+                      className={`flex-1 py-2.5 text-sm font-semibold transition ${
+                        mode === m
+                          ? m === "REJECT"
+                            ? "bg-red-600 text-white"
+                            : "bg-violet-600 text-white"
+                          : "bg-white/5 text-gray-400 hover:bg-white/10"
+                      }`}
+                    >
+                      {m === "REJECT" ? "❌ Reject" : "⏳ Queue"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-600 mt-1.5">
+                  {mode === "REJECT"
+                    ? "Excess requests are immediately rejected with 429"
+                    : "Excess requests wait in queue until window has space"}
+                </p>
+              </div>
+
               <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.97 }}
+                whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
                 onClick={setConfig}
                 className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white rounded-xl py-2.5 text-sm font-semibold transition mt-1"
               >
@@ -200,7 +282,7 @@ export default function App() {
               </motion.button>
             </div>
 
-            {/* Send buttons */}
+            {/* Fire Requests */}
             <div className="mt-6">
               <h2 className="text-base font-semibold text-gray-200 mb-3 flex items-center gap-2">
                 <span className="text-cyan-400">▶</span> Fire Requests
@@ -209,8 +291,7 @@ export default function App() {
                 {[5, 10, 20].map((n) => (
                   <motion.button
                     key={n}
-                    whileHover={{ scale: 1.04 }}
-                    whileTap={{ scale: 0.96 }}
+                    whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}
                     onClick={() => sendRequests(n)}
                     disabled={running}
                     className="bg-emerald-600/80 hover:bg-emerald-500 disabled:opacity-30 text-white rounded-xl py-2 text-sm font-medium transition"
@@ -239,7 +320,7 @@ export default function App() {
             </div>
           </motion.div>
 
-          {/* Right panel */}
+          {/* Right Panel */}
           <div className="space-y-4">
 
             {/* Window Status */}
@@ -259,7 +340,7 @@ export default function App() {
                     </div>
                     <div className="w-full bg-white/10 rounded-full h-2.5 overflow-hidden">
                       <motion.div
-                        className="h-2.5 rounded-full bg-gradient-to-r from-violet-500 to-indigo-400"
+                        className={`h-2.5 rounded-full ${usedPct >= 100 ? "bg-red-500" : "bg-gradient-to-r from-violet-500 to-indigo-400"}`}
                         initial={{ width: 0 }}
                         animate={{ width: `${usedPct}%` }}
                         transition={{ duration: 0.4, ease: "easeOut" }}
@@ -270,11 +351,19 @@ export default function App() {
                     {[
                       { label: "Remaining", value: status.remaining, color: "text-emerald-400" },
                       { label: "Resets in", value: status.resetsInMs > 0 ? `${(status.resetsInMs / 1000).toFixed(1)}s` : "Now", color: "text-yellow-400" },
-                      { label: "Window", value: `${status.windowSeconds}s`, color: "text-violet-300" },
-                      { label: "Max", value: status.maxRequests, color: "text-indigo-300" },
+                      { label: "In Queue", value: status.queued ?? 0, color: "text-violet-300" },
+                      { label: "Window", value: `${status.windowSeconds}s`, color: "text-indigo-300" },
                     ].map((s) => (
                       <div key={s.label} className="bg-white/5 rounded-xl p-3">
-                        <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+                        <motion.div
+                          key={s.value}
+                          initial={{ scale: 1.3, opacity: 0 }}
+                          animate={{ scale: 1, opacity: 1 }}
+                          transition={{ duration: 0.25 }}
+                          className={`text-xl font-bold ${s.color}`}
+                        >
+                          {s.value}
+                        </motion.div>
                         <div className="text-xs text-gray-500 mt-0.5">{s.label}</div>
                       </div>
                     ))}
@@ -292,10 +381,22 @@ export default function App() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
-                  className="bg-violet-500/10 border border-violet-500/30 rounded-2xl px-5 py-3 flex items-center gap-3"
+                  className={`border rounded-2xl px-5 py-3 flex items-center gap-3 ${
+                    mode === "QUEUE"
+                      ? "bg-violet-500/10 border-violet-500/30"
+                      : "bg-red-500/10 border-red-500/30"
+                  }`}
                 >
-                  <span className="w-2.5 h-2.5 rounded-full bg-violet-400 animate-ping inline-block" />
-                  <span className="text-violet-300 text-sm font-medium">Firing requests...</span>
+                  <span className={`w-2.5 h-2.5 rounded-full animate-ping inline-block ${
+                    mode === "QUEUE" ? "bg-violet-400" : "bg-red-400"
+                  }`} />
+                  <span className={`text-sm font-medium ${
+                    mode === "QUEUE" ? "text-violet-300" : "text-red-300"
+                  }`}>
+                    {mode === "QUEUE"
+                      ? "Firing requests — some may be queued..."
+                      : "Firing requests — excess will be rejected..."}
+                  </span>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -310,7 +411,7 @@ export default function App() {
           <h2 className="text-base font-semibold text-gray-200 mb-4 flex items-center gap-2">
             <span className="text-indigo-400">≡</span> Request Log
           </h2>
-          <div className="space-y-1 max-h-60 overflow-y-auto font-mono text-sm pr-1">
+          <div className="space-y-1 max-h-64 overflow-y-auto font-mono text-sm pr-1">
             {logs.length === 0 && (
               <p className="text-gray-600">No requests yet. Set config and fire requests.</p>
             )}
@@ -325,6 +426,8 @@ export default function App() {
                   className={`px-3 py-1.5 rounded-lg ${
                     log.type === "allowed" ? "text-emerald-400 bg-emerald-950/50" :
                     log.type === "rejected" ? "text-red-400 bg-red-950/50" :
+                    log.type === "processed" ? "text-cyan-400 bg-cyan-950/50" :
+                    log.type === "pending" ? "text-yellow-400 bg-yellow-950/30" :
                     "text-violet-300 bg-violet-950/50"
                   }`}
                 >
