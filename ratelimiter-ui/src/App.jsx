@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
 
-const BASE_URL = "http://localhost:8080/api";
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8080/api";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 24 },
